@@ -1,0 +1,195 @@
+# code 
+import streamlit as st
+import sqlite3
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+from pathlib import Path
+
+class DatabaseManager:
+    def __init__(self, db_name="secure_users.db"):
+        self.db_name = db_name
+        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+        self.create_tables()
+    
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        # Users table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            role TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # Content table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS content (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            role_access TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        self.conn.commit()
+    
+    def hash_password(self, password: str, salt: str = None) -> tuple:
+        if salt is None:
+            salt = secrets.token_hex(16)
+        hash_obj = hashlib.sha256((password + salt).encode())
+        password_hash = hash_obj.hexdigest()
+        return password_hash, salt
+    
+    def register_user(self, username, password, email, role='user'):
+        try:
+            cursor = self.conn.cursor()
+            password_hash, salt = self.hash_password(password)
+            cursor.execute(
+                'INSERT INTO users (username, password, salt, email, role) VALUES (?, ?, ?, ?, ?)',
+                (username, password_hash, salt, email, role)
+            )
+            self.conn.commit()
+            return True, "Registration successful!"
+        except sqlite3.IntegrityError:
+            return False, "Username or email already exists"
+    
+    def verify_user(self, username, password):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT password, salt, role FROM users WHERE username=?', (username,))
+        result = cursor.fetchone()
+        
+        if result:
+            stored_hash, salt, role = result
+            password_hash, _ = self.hash_password(password, salt)
+            if password_hash == stored_hash:
+                return True, role
+        return False, None
+
+    def add_content(self, title, content, created_by, role_access):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'INSERT INTO content (title, content, created_by, role_access) VALUES (?, ?, ?, ?)',
+            (title, content, created_by, role_access)
+        )
+        self.conn.commit()
+    
+    def get_content(self, user_role):
+        cursor = self.conn.cursor()
+        if user_role == 'admin':
+            cursor.execute('SELECT * FROM content ORDER BY created_at DESC')
+        else:
+            cursor.execute(
+                'SELECT * FROM content WHERE role_access=? OR role_access=? ORDER BY created_at DESC',
+                (user_role, 'all')
+            )
+        return cursor.fetchall()
+
+class AuthApp:
+    def __init__(self):
+        self.db = DatabaseManager()
+        self.initialize_session_state()
+    
+    def initialize_session_state(self):
+        if 'logged_in' not in st.session_state:
+            st.session_state.logged_in = False
+        if 'username' not in st.session_state:
+            st.session_state.username = None
+        if 'role' not in st.session_state:
+            st.session_state.role = None
+    
+    def login_page(self):
+        st.title("Login")
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            
+            if submitted:
+                success, role = self.db.verify_user(username, password)
+                if success:
+                    st.session_state.logged_in = True
+                    st.session_state.username = username
+                    st.session_state.role = role
+                    st.success("Login successful!")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password")
+    
+    def register_page(self):
+        st.title("Register")
+        with st.form("register_form"):
+            username = st.text_input("Username")
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            role = st.selectbox("Role", ["user", "moderator", "admin"])
+            submitted = st.form_submit_button("Register")
+             
+            
+            if submitted:
+                success, message = self.db.register_user(username, password, email, role)
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+    
+    def content_page(self):
+        st.title(f"Welcome, {st.session_state.username}")
+        st.write(f"Role: {st.session_state.role}")
+        
+        # Add content (admin/moderator only)
+        if st.session_state.role in ['admin', 'moderator']:
+            st.subheader("Add New Content")
+            with st.form("content_form"):
+                title = st.text_input("Title")
+                content = st.text_area("Content")
+                role_access = st.selectbox("Access Level", ["all", "moderator", "admin"])
+                submitted = st.form_submit_button("Add Content")
+                
+                if submitted:
+                    self.db.add_content(title, content, st.session_state.username, role_access)
+                    st.success("Content added successfully!")
+        
+        # View content
+        st.subheader("Available Content")
+        content = self.db.get_content(st.session_state.role)
+        if content:
+            for item in content:
+                with st.expander(f"{item[1]} (by {item[3]})"):
+                    st.write(item[2])
+                    st.caption(f"Access Level: {item[4]}")
+        else:
+            st.info("No content available.")
+        
+        if st.button("Logout"):
+            st.session_state.logged_in = False
+            st.session_state.username = None
+            st.session_state.role = None
+            st.rerun()
+
+def main():
+    st.set_page_config(
+        page_title="Auth System",
+        page_icon="🔒",
+        layout="wide"
+    )
+    
+    app = AuthApp()
+    
+    if not st.session_state.logged_in:
+        tab1, tab2 = st.tabs(["Login", "Register"])
+        with tab1:
+            app.login_page()
+        with tab2:
+            app.register_page()
+    else:
+        app.content_page()
+
+if __name__ == "__main__":
+    main()
